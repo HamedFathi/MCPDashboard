@@ -1,0 +1,93 @@
+name: Build and test
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: MCPDashboard
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: MCPDashboard/go.mod
+          cache-dependency-path: MCPDashboard/go.sum
+          cache: true
+
+      - name: Read product version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^[[:space:]]*productVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' release.go)
+          test -n "$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev
+
+      - name: Configure Windows compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            $mingw = 'C:\msys64\mingw64\bin'
+            if (-not (Test-Path (Join-Path $mingw 'gcc.exe'))) {
+              throw 'MinGW-w64 GCC is required for the Windows desktop build.'
+            }
+            Add-Content -Path $env:GITHUB_PATH -Value $mingw
+          }
+
+      - name: Test and vet with the software UI driver
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go test -tags ci -shuffle=on ./...
+          go vet -tags ci ./...
+
+      - name: Race checks
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -tags ci -shuffle=on -count=5 ./...
+
+      - name: Build and check Linux executable
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -tags x11 -trimpath -o "$RUNNER_TEMP/MCPDashboard" .
+          test "$("$RUNNER_TEMP/MCPDashboard" --version)" = "MCPDashboard $VERSION"
+
+      - name: Build and check Windows executable
+        if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: "1"
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'MCPDashboard.exe'
+          go build -trimpath -o $exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((& $exe --version) -ne "MCPDashboard $env:VERSION") { throw 'Unexpected version' }
+
+      - name: Build and check macOS executable
+        if: runner.os == 'macOS'
+        env:
+          CGO_ENABLED: "1"
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/MCPDashboard" .
+          test "$("$RUNNER_TEMP/MCPDashboard" --version)" = "MCPDashboard $VERSION"

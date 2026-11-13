@@ -1,0 +1,13 @@
+/coverage.out
+/*.test
+/*.test.exe
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.mcpd
+!/MCPDashboard/examples/microsoft-learn.mcpd
+mcp-profile-*.json
+
+# Build output (published through GitHub Releases, never committed)
+dist/

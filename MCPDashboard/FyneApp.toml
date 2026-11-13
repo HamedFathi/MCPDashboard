@@ -1,0 +1,6 @@
+[Details]
+  Name = "MCPDashboard"
+  ID = "local.mcpmanager.desktop"
+  Version = "1.0.0"
+  Build = 1
+  Icon = "packaging/icon/icon.png"

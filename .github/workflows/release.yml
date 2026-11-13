@@ -1,0 +1,201 @@
+name: Release
+
+# Push a tag such as v1.2.0 to build every platform and publish a GitHub Release.
+# The tag must match productVersion in MCPDashboard/release.go.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)publish, for example v1.0.0
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: MCPDashboard
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  version:
+    name: Check version metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Compare tag with version files
+        id: version
+        run: |
+          version="${TAG#v}"
+          fail=0
+          check() {
+            if ! grep -Eq "$2" "$1"; then
+              echo "::error file=MCPDashboard/$1::$1 does not declare version $version"
+              fail=1
+            fi
+          }
+          check release.go               "productVersion[[:space:]]*=[[:space:]]*\"$version\""
+          check FyneApp.toml             "Version[[:space:]]*=[[:space:]]*\"$version\""
+          check packaging/Info.plist     "<string>$version</string>"
+          check packaging/MCPDashboard.rc "\"ProductVersion\", \"$version\""
+          test "$fail" = 0
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: linux-amd64,   os: ubuntu-24.04 }
+          - { name: linux-arm64,   os: ubuntu-24.04-arm }
+          - { name: windows-amd64, os: windows-2025 }
+          - { name: windows-arm64, os: windows-11-arm }
+          - { name: macos-arm64,   os: macos-15 }
+          - { name: macos-amd64,   os: macos-15-intel }
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: MCPDashboard/go.mod
+          cache-dependency-path: MCPDashboard/go.sum
+          cache: true
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev
+
+      - name: Configure Windows compiler
+        if: matrix.name == 'windows-amd64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            $mingw = 'C:\msys64\mingw64\bin'
+            if (-not (Test-Path (Join-Path $mingw 'gcc.exe'))) {
+              throw 'MinGW-w64 GCC is required for the Windows desktop build.'
+            }
+            Add-Content -Path $env:GITHUB_PATH -Value $mingw
+          }
+
+      - name: Configure Windows ARM64 compiler
+        if: matrix.name == 'windows-arm64'
+        shell: pwsh
+        env:
+          LLVM_MINGW: llvm-mingw-20261104-ucrt-aarch64
+          LLVM_MINGW_SHA256: 7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "$env:LLVM_MINGW.zip"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$env:LLVM_MINGW.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:LLVM_MINGW_SHA256) { throw 'llvm-mingw checksum mismatch' }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP $env:LLVM_MINGW 'bin')
+          Add-Content -Path $env:GITHUB_ENV -Value 'CC=aarch64-w64-mingw32-clang'
+          Add-Content -Path $env:GITHUB_ENV -Value 'CXX=aarch64-w64-mingw32-clang++'
+
+      - name: Embed Windows ARM64 version resource
+        if: matrix.name == 'windows-arm64'
+        run: aarch64-w64-mingw32-windres -O coff -i packaging/MCPDashboard.rc -o release_windows_arm64.syso
+
+      - name: Test
+        run: go test -tags ci ./...
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        run: |
+          stage="$RUNNER_TEMP/MCPDashboard-$VERSION-${{ matrix.name }}"
+          mkdir -p "$stage" "$GITHUB_WORKSPACE/out"
+          go build -tags x11 -buildvcs=false -trimpath -ldflags='-s -w' -o "$stage/MCPDashboard" .
+          test "$("$stage/MCPDashboard" --version)" = "MCPDashboard $VERSION"
+          cp ../LICENSE ../README.md ../THIRD-PARTY-NOTICES.txt "$stage/"
+          cp packaging/icon/icon.png "$stage/MCPDashboard.png"
+          tar -C "$RUNNER_TEMP" -czf "$GITHUB_WORKSPACE/out/$(basename "$stage").tar.gz" "$(basename "$stage")"
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "MCPDashboard-$env:VERSION-${{ matrix.name }}"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          $out = Join-Path $env:GITHUB_WORKSPACE 'out'
+          New-Item -ItemType Directory -Force $stage, $out | Out-Null
+          $exe = Join-Path $stage 'MCPDashboard.exe'
+          go build -buildvcs=false -trimpath -ldflags='-s -w' -o $exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((& $exe --version) -ne "MCPDashboard $env:VERSION") { throw 'Unexpected version' }
+          Copy-Item ..\LICENSE, ..\README.md, ..\THIRD-PARTY-NOTICES.txt $stage
+          Compress-Archive -Path $stage -DestinationPath (Join-Path $out "$name.zip")
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: |
+          name="MCPDashboard-$VERSION-${{ matrix.name }}"
+          stage="$RUNNER_TEMP/$name"
+          bundle="$stage/MCPDashboard.app"
+          mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$GITHUB_WORKSPACE/out"
+          cp packaging/Info.plist "$bundle/Contents/Info.plist"
+          cp packaging/icon/MCPDashboard.icns "$bundle/Contents/Resources/"
+          go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$bundle/Contents/MacOS/MCPDashboard" .
+          /usr/bin/codesign --force --sign - "$bundle"
+          /usr/bin/codesign --verify --strict "$bundle"
+          test "$("$bundle/Contents/MacOS/MCPDashboard" --version)" = "MCPDashboard $VERSION"
+          cp ../LICENSE ../README.md ../THIRD-PARTY-NOTICES.txt "$stage/"
+          /usr/bin/ditto -c -k --keepParent "$stage" "$GITHUB_WORKSPACE/out/$name.zip"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Write checksums
+        working-directory: out
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* \
+              --title "MCPDashboard ${{ needs.version.outputs.version }}" \
+              --generate-notes --verify-tag
+          fi
