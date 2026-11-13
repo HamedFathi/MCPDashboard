@@ -289,7 +289,15 @@ The importer requires a matching signature, supported version and flags, consist
 
 ## Screenshots
 
+<img width="1125" height="773" alt="Screenshot_1" src="https://github.com/user-attachments/assets/8909fe0d-1b26-4cbf-b5c3-4540d7b4567b" />
 
+<img width="942" height="791" alt="Screenshot_2" src="https://github.com/user-attachments/assets/1cb522ef-dbfc-44b0-853a-9402c1e336a0" />
+
+<img width="1122" height="774" alt="Screenshot_3" src="https://github.com/user-attachments/assets/4423961e-2d4a-466e-9304-9e6d18650126" />
+
+<img width="1119" height="773" alt="Screenshot_4" src="https://github.com/user-attachments/assets/9a726f57-6a76-4722-b0a2-6dc22c1cde74" />
+
+<img width="1121" height="774" alt="Screenshot_5" src="https://github.com/user-attachments/assets/7c12b74a-312c-4867-8819-1495a1325893" />
 
 ## License
 
